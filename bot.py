@@ -243,12 +243,14 @@ def help_message() -> str:
         "/имена — показать список всех имён в этой беседе\n"
         "/топ [дни] — топ‑10 по сообщениям и броскам (за всё время или за последние N дней, N≤365)\n"
         "/помощь — эта справка\n"
-        "Можно писать несколько команд в одном сообщении через пробел: /d20 /attack /d6+1"
+        "Все команды начинаются с символа /"
     )
 
-# ---------- Разбор команд ----------
+# ---------- Разбор команд (только со слешем) ----------
 def parse_single_command(text: str):
     text = text.strip().lower()
+    if not text.startswith('/'):
+        return None
     
     # /имя <текст>
     match_name = re.match(r'^/имя\s+(.+)$', text)
@@ -267,10 +269,10 @@ def parse_single_command(text: str):
             days = None
         return ('top', {'days': days})
     
-    # Множественные кубы: /2d20, 2d20, /2к20+3 и т.п.
-    match_multiple_slash = re.match(r'^/(\d+)([dк])(\d+)([+-]\d+)?$', text)
-    if match_multiple_slash:
-        count_str, cube_type, sides_str, mod_str = match_multiple_slash.groups()
+    # Множественные кубы: /2d20, /2к20+3
+    match_multiple = re.match(r'^/(\d+)([dк])(\d+)([+-]\d+)?$', text)
+    if match_multiple:
+        count_str, cube_type, sides_str, mod_str = match_multiple.groups()
         count = int(count_str)
         sides = int(sides_str)
         if count > 100:
@@ -280,33 +282,10 @@ def parse_single_command(text: str):
         modifier = int(mod_str) if mod_str else 0
         return ('multiple', {'count': count, 'sides': sides, 'modifier': modifier})
     
-    match_multiple_no_slash = re.match(r'^(\d+)([dк])(\d+)([+-]\d+)?$', text)
-    if match_multiple_no_slash:
-        count_str, cube_type, sides_str, mod_str = match_multiple_no_slash.groups()
-        count = int(count_str)
-        sides = int(sides_str)
-        if count > 100:
-            count = 100
-        if sides > 100:
-            sides = 100
-        modifier = int(mod_str) if mod_str else 0
-        return ('multiple', {'count': count, 'sides': sides, 'modifier': modifier})
-    
-    # Одиночные кубы с указанием граней: d20, /d20, d20+2, /d20+2, d4, /d4, d100, к20, /к20 и т.п.
-    # Со слешем
-    match_single_slash = re.match(r'^/([dк])(\d+)([+-]\d+)?$', text)
-    if match_single_slash:
-        cube_type, sides_str, mod_str = match_single_slash.groups()
-        sides = int(sides_str)
-        if sides > 100:
-            sides = 100
-        modifier = int(mod_str) if mod_str else 0
-        return ('dice', {'sides': sides, 'modifier': modifier})
-    
-    # Без слеша
-    match_single_no_slash = re.match(r'^([dк])(\d+)([+-]\d+)?$', text)
-    if match_single_no_slash:
-        cube_type, sides_str, mod_str = match_single_no_slash.groups()
+    # Одиночные кубы: /d20, /d20+2, /d4, /к20, /к20-1
+    match_single = re.match(r'^/([dк])(\d+)([+-]\d+)?$', text)
+    if match_single:
+        cube_type, sides_str, mod_str = match_single.groups()
         sides = int(sides_str)
         if sides > 100:
             sides = 100
@@ -334,19 +313,17 @@ def parse_single_command(text: str):
     return None
 
 def split_commands(full_text: str):
+    """Разбивает текст на отдельные команды (начинающиеся с /). Поддерживает /имя с пробелом."""
     parts = full_text.strip().split()
     commands = []
     for part in parts:
-        # Пропускаем одиночные "к", "d", "/к", "/d"
-        if part in ('к', 'd', '/к', '/d'):
-            continue
-        if part.startswith('/') or re.match(r'^(\d+)?[dк]\d*([+-]\d+)?$', part):
+        if part.startswith('/'):
             commands.append(part)
         else:
+            # Если предыдущая команда — /имя, присоединяем к ней
             if commands and commands[-1].startswith('/имя'):
                 commands[-1] += ' ' + part
-            else:
-                continue
+            # Иначе игнорируем текст без слеша
     return commands
 
 def execute_command(cmd: str, peer_id: int, user_id: int):
@@ -495,7 +472,7 @@ def handle_message(event):
 
 def main():
     init_db()
-    logging.info(f"Бот сообщества {GROUP_ID} запущен. Поддерживаются множественные команды через пробел.")
+    logging.info(f"Бот сообщества {GROUP_ID} запущен. Поддерживаются команды только с символом / в начале.")
     while True:
         try:
             for event in longpoll.listen():
