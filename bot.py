@@ -132,26 +132,66 @@ def get_top_users(peer_id, days=None):
     
     conn.close()
     
+    # --- ИСПРАВЛЕНИЕ: получение имён для топа ---
     user_names = {}
     for user_id, _ in top_messages + top_rolls:
+        # Сначала проверяем имя из БД
         name = get_user_name(user_id, peer_id)
         if name:
             user_names[user_id] = name
         else:
-            user_names[user_id] = f"id{user_id}"
+            # Если имени нет, получаем screen_name из профиля ВК
+            screen_name = get_user_screen_name(user_id)
+            user_names[user_id] = screen_name if screen_name else f"id{user_id}"
     
     top_messages_named = [(uid, cnt, user_names.get(uid, f"id{uid}")) for uid, cnt in top_messages]
     top_rolls_named = [(uid, cnt, user_names.get(uid, f"id{uid}")) for uid, cnt in top_rolls]
     
     return top_messages_named, top_rolls_named
 
+# --- НОВАЯ ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ SCREEN_NAME С КЭШИРОВАНИЕМ ---
+_screen_name_cache = {}
+def get_user_screen_name(user_id: int) -> str:
+    """Получает screen_name пользователя через VK API с кэшированием."""
+    if user_id in _screen_name_cache:
+        return _screen_name_cache[user_id]
+    try:
+        # Запрашиваем информацию о пользователе
+        user_info = vk.users.get(user_ids=user_id, fields='screen_name')[0]
+        screen_name = user_info.get('screen_name')
+        if screen_name:
+            _screen_name_cache[user_id] = screen_name
+            return screen_name
+        else:
+            # Если screen_name нет, используем имя и фамилию
+            first_name = user_info.get('first_name', '')
+            last_name = user_info.get('last_name', '')
+            full_name = f"{first_name} {last_name}".strip()
+            if full_name:
+                _screen_name_cache[user_id] = full_name
+                return full_name
+            return None
+    except Exception as e:
+        logging.error(f"Ошибка при получении screen_name для {user_id}: {e}")
+        return None
+
+# --- ОБНОВЛЕННАЯ ФУНКЦИЯ ОТОБРАЖЕНИЯ ИМЕНИ ---
 def get_display_name(user_id: int, peer_id: int) -> str:
-    name = get_user_name(user_id, peer_id)
-    if name:
-        return name
+    """Возвращает имя для отображения: из БД бота или screen_name из ВК."""
+    # 1. Приоритет у имени, установленного через бота
+    custom_name = get_user_name(user_id, peer_id)
+    if custom_name:
+        return custom_name
+    
+    # 2. Если имени в боте нет, получаем screen_name из профиля ВК
+    screen_name = get_user_screen_name(user_id)
+    if screen_name:
+        return screen_name
+    
+    # 3. Если ничего не найдено, показываем ID
     return f"id{user_id}"
 
-# ---------- Функции бросков ----------
+# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (БЕЗ ИЗМЕНЕНИЙ) ----------
 def roll_dice(sides: int, modifier: int = 0) -> tuple:
     result = random.randint(1, sides)
     total = result + modifier
@@ -252,7 +292,6 @@ def parse_single_command(text: str):
     if not text.startswith('/'):
         return None
     
-    # /имя <текст>
     match_name = re.match(r'^/имя\s+(.+)$', text)
     if match_name:
         name_text = match_name.group(1).strip()
@@ -269,7 +308,6 @@ def parse_single_command(text: str):
             days = None
         return ('top', {'days': days})
     
-    # Множественные кубы: /2d20, /2к20+3
     match_multiple = re.match(r'^/(\d+)([dк])(\d+)([+-]\d+)?$', text)
     if match_multiple:
         count_str, cube_type, sides_str, mod_str = match_multiple.groups()
@@ -282,7 +320,6 @@ def parse_single_command(text: str):
         modifier = int(mod_str) if mod_str else 0
         return ('multiple', {'count': count, 'sides': sides, 'modifier': modifier})
     
-    # Одиночные кубы: /d20, /d20+2, /d4, /к20, /к20-1
     match_single = re.match(r'^/([dк])(\d+)([+-]\d+)?$', text)
     if match_single:
         cube_type, sides_str, mod_str = match_single.groups()
@@ -292,38 +329,32 @@ def parse_single_command(text: str):
         modifier = int(mod_str) if mod_str else 0
         return ('dice', {'sides': sides, 'modifier': modifier})
     
-    # Помеха /кпом, /кпом+2
     match = re.match(r'^/кпом([+-]\d+)?$', text)
     if match:
         mod_str = match.group(1)
         modifier = int(mod_str) if mod_str else 0
         return ('disadvantage', {'modifier': modifier})
     
-    # Преимущество /кпре, /кпре+2
     match = re.match(r'^/кпре([+-]\d+)?$', text)
     if match:
         mod_str = match.group(1)
         modifier = int(mod_str) if mod_str else 0
         return ('advantage', {'modifier': modifier})
     
-    # Команды без параметров
     if text in ('/attack', '/defense', '/double', '/reroll', '/помощь', '/help'):
         return ('simple', text)
     
     return None
 
 def split_commands(full_text: str):
-    """Разбивает текст на отдельные команды (начинающиеся с /). Поддерживает /имя с пробелом."""
     parts = full_text.strip().split()
     commands = []
     for part in parts:
         if part.startswith('/'):
             commands.append(part)
         else:
-            # Если предыдущая команда — /имя, присоединяем к ней
             if commands and commands[-1].startswith('/имя'):
                 commands[-1] += ' ' + part
-            # Иначе игнорируем текст без слеша
     return commands
 
 def execute_command(cmd: str, peer_id: int, user_id: int):
@@ -333,7 +364,6 @@ def execute_command(cmd: str, peer_id: int, user_id: int):
     
     cmd_type, params = parsed
     
-    # Команды без префикса имени
     no_prefix_commands = ('setname', 'listnames', 'top')
     
     if cmd_type not in no_prefix_commands:
@@ -356,7 +386,10 @@ def execute_command(cmd: str, peer_id: int, user_id: int):
         names = get_all_names_in_peer(peer_id)
         if not names:
             return "📋 В этой беседе ещё никто не установил имя. Используйте `/имя ВашеИмя`."
-        lines = [f"{name} (id{uid})" for uid, name in names]
+        # --- ИСПРАВЛЕНИЕ: получение имён для списка ---
+        lines = []
+        for uid, name in names:
+            lines.append(f"{name} (id{uid})")
         return "📋 Список имён в беседе:\n" + "\n".join(lines)
     
     if cmd_type == 'top':
@@ -380,7 +413,6 @@ def execute_command(cmd: str, peer_id: int, user_id: int):
             result += "Нет данных.\n"
         return result
     
-    # Команды бросков (с префиксом имени)
     if cmd_type == 'dice':
         sides = params['sides']
         modifier = params['modifier']
