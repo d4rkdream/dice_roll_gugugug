@@ -1,157 +1,72 @@
-import os
-import re
-import random
-import logging
-import time
-from vk_api import VkApi
-from vk_api.longpoll import VkLongPoll, VkEventType
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-VK_TOKEN = os.environ.get('VK_TOKEN')
-if not VK_TOKEN:
-    logging.error('Переменная окружения VK_TOKEN не установлена!')
-    exit(1)
-
-vk_session = VkApi(token=VK_TOKEN)
-vk = vk_session.get_api()
-longpoll = VkLongPoll(vk_session)
-
-def roll_dice(sides: int, modifier: int = 0) -> tuple:
-    result = random.randint(1, sides)
-    total = result + modifier
-    return result, total
-
-def roll_advantage(modifier: int = 0) -> dict:
-    """Бросает 2d20, возвращает оба значения, выбранное (макс) и итог с модификатором."""
-    roll1 = random.randint(1, 20)
-    roll2 = random.randint(1, 20)
-    chosen = max(roll1, roll2)
-    total = chosen + modifier
-    return {
-        'roll1': roll1,
-        'roll2': roll2,
-        'chosen': chosen,
-        'total': total,
-        'modifier': modifier
-    }
-
-def roll_disadvantage(modifier: int = 0) -> dict:
-    """Бросает 2d20, возвращает оба значения, выбранное (мин) и итог с модификатором."""
-    roll1 = random.randint(1, 20)
-    roll2 = random.randint(1, 20)
-    chosen = min(roll1, roll2)
-    total = chosen + modifier
-    return {
-        'roll1': roll1,
-        'roll2': roll2,
-        'chosen': chosen,
-        'total': total,
-        'modifier': modifier
-    }
-
-def parse_command(text: str):
-    """Разбирает команду. Возвращает (тип_команды, параметры)."""
-    text = text.strip().lower()
-    
-    # Обычные кубы /d4, /d20+2, /к, /к+1
-    match = re.match(r'^/([dк])(\d*)([+-]\d+)?$', text)
-    if match:
-        cube_type, sides_str, mod_str = match.groups()
-        if sides_str:
-            sides = int(sides_str)
-        else:
-            sides = 20  # по умолчанию для /к
-        if sides > 100:
-            sides = 100
-        modifier = int(mod_str) if mod_str else 0
-        return ('dice', {'sides': sides, 'modifier': modifier})
-    
-    # Помеха /кпом, /кпом+2
-    match = re.match(r'^/кпом([+-]\d+)?$', text)
-    if match:
-        mod_str = match.group(1)
-        modifier = int(mod_str) if mod_str else 0
-        return ('disadvantage', {'modifier': modifier})
-    
-    # Преимущество /кпре, /кпре+2
-    match = re.match(r'^/кпре([+-]\d+)?$', text)
-    if match:
-        mod_str = match.group(1)
-        modifier = int(mod_str) if mod_str else 0
-        return ('advantage', {'modifier': modifier})
-    
-    return None
-
-def attack_roll() -> str:
-    roll = random.randint(1, 20)
-    if roll == 1:
-        return f"🎲 Результат атаки: {roll} — Промах!"
-    elif roll == 20:
-        return f"🎲 Результат атаки: {roll} — Критическое попадание!"
-    else:
-        return f"🎲 Результат атаки: {roll} — Попадание!"
-
-def defense_roll() -> str:
-    roll = random.randint(1, 20)
-    if roll == 1:
-        return f"🛡️ Результат защиты: {roll} — Провал!"
-    elif roll == 20:
-        return f"🛡️ Результат защиты: {roll} — Критический успех!"
-    else:
-        return f"🛡️ Результат защиты: {roll} — Успех!"
-
-def double_roll() -> str:
-    roll = random.randint(1, 6)
-    if roll == 6:
-        return f"💥 Куб удвоения: {roll} — ×2"
-    else:
-        return f"💥 Куб удвоения: {roll} — пусто"
-
-def help_message() -> str:
-    return (
-        "Список команд:\n"
-        "/d4, /d6, /d8, /d10, /d12, /d20, /d100 — бросить куб\n"
-        "/d4+2, /d20-1 — бросить с модификатором\n"
-        "/к — бросить d20 (сокращение)\n"
-        "/кпом — бросить с помехой (2d20, берётся меньшее)\n"
-        "/кпре — бросить с преимуществом (2d20, берётся большее)\n"
-        "/кпом+2, /кпре-1 — с модификатором\n"
-        "/attack — бросок атаки (промах/попадание/крит)\n"
-        "/defense — бросок защиты (провал/успех/крит)\n"
-        "/double — куб удвоения (пусто/×2)\n"
-        "/помощь — показать эту справку"
-    )
-
-def handle_message(text: str, user_id: int):
-    text = text.strip().lower()
-    
-    if text == '/attack':
-        answer = attack_roll()
-        vk.messages.send(user_id=user_id, message=answer, random_id=0)
-        return
-    
-    if text == '/defense':
-        answer = defense_roll()
-        vk.messages.send(user_id=user_id, message=answer, random_id=0)
-        return
-    
-    if text == '/double':
-        answer = double_roll()
-        vk.messages.send(user_id=user_id, message=answer, random_id=0)
-        return
-    
-    if text in ('/помощь', '/help'):
-        answer = help_message()
-        vk.messages.send(user_id=user_id, message=answer, random_id=0)
-        return
-    
-    parsed = parse_command(text)
+def execute_command(cmd: str, peer_id: int, user_id: int):
+    """Выполняет одну команду и возвращает ответ (или None)."""
+    parsed = parse_single_command(cmd)
     if not parsed:
-        return
+        return None
     
     cmd_type, params = parsed
     
+    # Команды, для которых НЕ нужно добавлять имя перед ответом
+    no_prefix_commands = ('setname', 'listnames', 'top', 'kickleft')
+    
+    # Получаем отображаемое имя, если нужно
+    display_name = None
+    if cmd_type not in no_prefix_commands:
+        display_name = get_display_name(user_id, peer_id)
+    
+    # ---- существующие обработчики команд ----
+    if cmd_type == 'setname':
+        if peer_id <= 2000000000:
+            return "❌ Эта команда работает только в беседах."
+        name = params['name']
+        if len(name) > 32:
+            name = name[:32]
+        set_user_name(user_id, peer_id, name)
+        return f"✅ Ваше имя в этой беседе установлено как «{name}»."
+    
+    if cmd_type == 'listnames':
+        if peer_id <= 2000000000:
+            return "❌ Эта команда работает только в беседах."
+        names = get_all_names_in_peer(peer_id)
+        if not names:
+            return "📋 В этой беседе ещё никто не установил имя. Используйте `/имя ВашеИмя`."
+        lines = [f"{name} (id{uid})" for uid, name in names]
+        return "📋 Список имён в беседе:\n" + "\n".join(lines)
+    
+    if cmd_type == 'top':
+        if peer_id <= 2000000000:
+            return "❌ Эта команда работает только в беседах."
+        days = params['days']
+        top_msg, top_roll = get_top_users(peer_id, days)
+        period = f"за последние {days} дней" if days else "за всё время"
+        result = f"📊 Статистика {period}:\n\n"
+        result += "✉️ Топ по сообщениям:\n"
+        if top_msg:
+            for i, (uid, cnt, name) in enumerate(top_msg, 1):
+                result += f"{i}. {name}: {cnt} сообщ.\n"
+        else:
+            result += "Нет данных.\n"
+        result += "\n🎲 Топ по броскам:\n"
+        if top_roll:
+            for i, (uid, cnt, name) in enumerate(top_roll, 1):
+                result += f"{i}. {name}: {cnt} бросков\n"
+        else:
+            result += "Нет данных.\n"
+        return result
+    
+    if cmd_type == 'kickleft':
+        if peer_id <= 2000000000:
+            return "❌ Эта команда работает только в беседах."
+        try:
+            members = vk.messages.getConversationMembers(peer_id=peer_id, fields='')
+            current_ids = [abs(member['member_id']) for member in members['items']]
+            deleted = remove_users_not_in_peer(peer_id, current_ids)
+            return f"🧹 Удалено записей о вышедших пользователях: {deleted}."
+        except Exception as e:
+            logging.error(f"Ошибка при получении участников беседы {peer_id}: {e}")
+            return "❌ Не удалось получить список участников. Убедитесь, что бот является администратором беседы."
+    
+    # ---- Далее идут команды бросков (к ним добавляем имя) ----
     if cmd_type == 'dice':
         sides = params['sides']
         modifier = params['modifier']
@@ -161,7 +76,20 @@ def handle_message(text: str, user_id: int):
         else:
             sign = '+' if modifier > 0 else ''
             answer = f"🎲 Бросок d{sides}{sign}{modifier}: {roll_result} {sign}{modifier} = {total}"
-        vk.messages.send(user_id=user_id, message=answer, random_id=0)
+        return f"{display_name}, {answer}"
+    
+    elif cmd_type == 'multiple':
+        count = params['count']
+        sides = params['sides']
+        modifier = params['modifier']
+        data = roll_multiple(count, sides, modifier)
+        results_str = ', '.join(map(str, data['results']))
+        sign = '+' if modifier > 0 else ''
+        if modifier == 0:
+            answer = f"🎲 Бросок {count}d{sides}: [{results_str}] сумма = {data['sum']}"
+        else:
+            answer = f"🎲 Бросок {count}d{sides}{sign}{modifier}: [{results_str}] сумма {data['sum']} {sign}{modifier} = {data['final']}"
+        return f"{display_name}, {answer}"
     
     elif cmd_type == 'advantage':
         modifier = params['modifier']
@@ -171,7 +99,7 @@ def handle_message(text: str, user_id: int):
             answer = f"🎲 Преимущество: кубы {data['roll1']} и {data['roll2']} → выбрано {data['chosen']}"
         else:
             answer = f"🎲 Преимущество: кубы {data['roll1']} и {data['roll2']} → выбрано {data['chosen']} {sign}{modifier} = {data['total']}"
-        vk.messages.send(user_id=user_id, message=answer, random_id=0)
+        return f"{display_name}, {answer}"
     
     elif cmd_type == 'disadvantage':
         modifier = params['modifier']
@@ -181,18 +109,21 @@ def handle_message(text: str, user_id: int):
             answer = f"🎲 Помеха: кубы {data['roll1']} и {data['roll2']} → выбрано {data['chosen']}"
         else:
             answer = f"🎲 Помеха: кубы {data['roll1']} и {data['roll2']} → выбрано {data['chosen']} {sign}{modifier} = {data['total']}"
-        vk.messages.send(user_id=user_id, message=answer, random_id=0)
-
-def main():
-    logging.info("Бот запущен и слушает сообщения...")
-    while True:
-        try:
-            for event in longpoll.listen():
-                if event.type == VkEventType.MESSAGE_NEW and event.to_me:
-                    handle_message(event.text.strip(), event.user_id)
-        except Exception as e:
-            logging.error(f"Ошибка в longpoll: {e}")
-            time.sleep(5)
-
-if __name__ == '__main__':
-    main()
+        return f"{display_name}, {answer}"
+    
+    elif cmd_type == 'simple':
+        if params == '/attack':
+            answer = attack_roll()
+        elif params == '/defense':
+            answer = defense_roll()
+        elif params == '/double':
+            answer = double_roll()
+        elif params == '/reroll':
+            answer = reroll_cube()
+        elif params in ('/помощь', '/help'):
+            return help_message()  # помощь без имени
+        else:
+            return None
+        return f"{display_name}, {answer}"
+    
+    return None
