@@ -145,21 +145,6 @@ def get_top_users(peer_id, days=None):
     
     return top_messages_named, top_rolls_named
 
-def remove_users_not_in_peer(peer_id, current_user_ids):
-    if not current_user_ids:
-        return 0
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    placeholders = ','.join('?' * len(current_user_ids))
-    c.execute(f'DELETE FROM users WHERE peer_id = ? AND user_id NOT IN ({placeholders})',
-              (peer_id, *current_user_ids))
-    deleted_users = c.rowcount
-    c.execute(f'DELETE FROM daily_stats WHERE peer_id = ? AND user_id NOT IN ({placeholders})',
-              (peer_id, *current_user_ids))
-    conn.commit()
-    conn.close()
-    return deleted_users
-
 def get_display_name(user_id: int, peer_id: int) -> str:
     name = get_user_name(user_id, peer_id)
     if name:
@@ -246,7 +231,6 @@ def help_message() -> str:
         "Список команд:\n"
         "/d4, /d6, /d8, /d10, /d12, /d20, /d100 — бросить куб\n"
         "/d4+2, /d20-1 — с модификатором\n"
-        "/к — бросить d20 (сокращение)\n"
         "/2d20, /3d100, /2к20, /4к6+3 — бросить несколько кубов (до 100 штук, грани до 100)\n"
         "/кпом — помеха (2d20, меньшее)\n"
         "/кпре — преимущество (2d20, большее)\n"
@@ -266,6 +250,7 @@ def help_message() -> str:
 def parse_single_command(text: str):
     text = text.strip().lower()
     
+    # /имя <текст>
     match_name = re.match(r'^/имя\s+(.+)$', text)
     if match_name:
         name_text = match_name.group(1).strip()
@@ -282,9 +267,7 @@ def parse_single_command(text: str):
             days = None
         return ('top', {'days': days})
     
-    if text == '/вышедшие кик':
-        return ('kickleft', None)
-    
+    # Множественные кубы: /2d20, 2d20, /2к20+3 и т.п.
     match_multiple_slash = re.match(r'^/(\d+)([dк])(\d+)([+-]\d+)?$', text)
     if match_multiple_slash:
         count_str, cube_type, sides_str, mod_str = match_multiple_slash.groups()
@@ -309,42 +292,42 @@ def parse_single_command(text: str):
         modifier = int(mod_str) if mod_str else 0
         return ('multiple', {'count': count, 'sides': sides, 'modifier': modifier})
     
-    match_single_slash = re.match(r'^/([dк])(\d*)([+-]\d+)?$', text)
+    # Одиночные кубы с указанием граней: d20, /d20, d20+2, /d20+2, d4, /d4, d100, к20, /к20 и т.п.
+    # Со слешем
+    match_single_slash = re.match(r'^/([dк])(\d+)([+-]\d+)?$', text)
     if match_single_slash:
         cube_type, sides_str, mod_str = match_single_slash.groups()
-        if sides_str:
-            sides = int(sides_str)
-        else:
-            sides = 20
+        sides = int(sides_str)
         if sides > 100:
             sides = 100
         modifier = int(mod_str) if mod_str else 0
         return ('dice', {'sides': sides, 'modifier': modifier})
     
-    match_single_no_slash = re.match(r'^([dк])(\d*)([+-]\d+)?$', text)
+    # Без слеша
+    match_single_no_slash = re.match(r'^([dк])(\d+)([+-]\d+)?$', text)
     if match_single_no_slash:
         cube_type, sides_str, mod_str = match_single_no_slash.groups()
-        if sides_str:
-            sides = int(sides_str)
-        else:
-            sides = 20
+        sides = int(sides_str)
         if sides > 100:
             sides = 100
         modifier = int(mod_str) if mod_str else 0
         return ('dice', {'sides': sides, 'modifier': modifier})
     
+    # Помеха /кпом, /кпом+2
     match = re.match(r'^/кпом([+-]\d+)?$', text)
     if match:
         mod_str = match.group(1)
         modifier = int(mod_str) if mod_str else 0
         return ('disadvantage', {'modifier': modifier})
     
+    # Преимущество /кпре, /кпре+2
     match = re.match(r'^/кпре([+-]\d+)?$', text)
     if match:
         mod_str = match.group(1)
         modifier = int(mod_str) if mod_str else 0
         return ('advantage', {'modifier': modifier})
     
+    # Команды без параметров
     if text in ('/attack', '/defense', '/double', '/reroll', '/помощь', '/help'):
         return ('simple', text)
     
@@ -354,6 +337,9 @@ def split_commands(full_text: str):
     parts = full_text.strip().split()
     commands = []
     for part in parts:
+        # Пропускаем одиночные "к", "d", "/к", "/d"
+        if part in ('к', 'd', '/к', '/d'):
+            continue
         if part.startswith('/') or re.match(r'^(\d+)?[dк]\d*([+-]\d+)?$', part):
             commands.append(part)
         else:
@@ -371,7 +357,7 @@ def execute_command(cmd: str, peer_id: int, user_id: int):
     cmd_type, params = parsed
     
     # Команды без префикса имени
-    no_prefix_commands = ('setname', 'listnames', 'top', 'kickleft')
+    no_prefix_commands = ('setname', 'listnames', 'top')
     
     if cmd_type not in no_prefix_commands:
         display_name = get_display_name(user_id, peer_id)
@@ -416,18 +402,6 @@ def execute_command(cmd: str, peer_id: int, user_id: int):
         else:
             result += "Нет данных.\n"
         return result
-    
-    if cmd_type == 'kickleft':
-        if peer_id <= 2000000000:
-            return "❌ Эта команда работает только в беседах."
-        try:
-            members = vk.messages.getConversationMembers(peer_id=peer_id, fields='')
-            current_ids = [abs(member['member_id']) for member in members['items']]
-            deleted = remove_users_not_in_peer(peer_id, current_ids)
-            return f"🧹 Удалено записей о вышедших пользователях: {deleted}."
-        except Exception as e:
-            logging.error(f"Ошибка при получении участников беседы {peer_id}: {e}")
-            return "❌ Не удалось получить список участников. Убедитесь, что бот является администратором беседы."
     
     # Команды бросков (с префиксом имени)
     if cmd_type == 'dice':
